@@ -1,5 +1,5 @@
 /*
-* Copyright 2017-2022 NVIDIA Corporation.  All rights reserved.
+* Copyright 2017-2024 NVIDIA Corporation.  All rights reserved.
 *
 * Please refer to the NVIDIA end user license agreement (EULA) associated
 * with this source code for terms and conditions that govern your use of
@@ -341,6 +341,8 @@ int main(int argc, char *argv[])
             std::cout << "Error: Sample app doesn't support YUV444" << std::endl;
             return 1;
         }
+
+        encodeCLIOptions.setTransOneToN(true);
         int nEnc = (int)vResolution.size();
         for (int i = 0; i < nEnc; i++)
         {

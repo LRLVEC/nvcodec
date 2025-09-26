@@ -1,5 +1,5 @@
 /*
-* Copyright 2017-2022 NVIDIA Corporation.  All rights reserved.
+* Copyright 2017-2024 NVIDIA Corporation.  All rights reserved.
 *
 * Please refer to the NVIDIA end user license agreement (EULA) associated
 * with this source code for terms and conditions that govern your use of
@@ -179,7 +179,7 @@ public:
 		}
 	}
 
-	void DumpOutputToFile(CUdeviceptr pEncFrameBfr, CUdeviceptr pCRCBfr, std::ofstream &fpOut, uint32_t nFrame)
+	void DumpOutputToFile(CUdeviceptr pEncFrameBfr, CUdeviceptr pCRCBfr, std::ofstream &fpOut, uint32_t nFrame, bool &bWriteIVFFileHeader, NV_ENC_INITIALIZE_PARAMS &pInitializeParams)
 	{
 		ck(cuCtxPushCurrent(device));
 
@@ -198,6 +198,22 @@ public:
 		uint32_t offset = sizeof(NV_ENC_ENCODE_OUT_PARAMS);
 		uint32_t bitstream_size = ((NV_ENC_ENCODE_OUT_PARAMS *)pHostMemEncOp)->bitstreamSizeInBytes;
 		uint8_t * ptr = pHostMemEncOp + offset;
+
+		IVFUtils iVFUtils;
+		int64_t pts = 0;
+		std::vector<uint8_t> vPacket;
+		if (pInitializeParams.encodeGUID == NV_ENC_CODEC_AV1_GUID)
+		{
+			if (bWriteIVFFileHeader)
+			{
+				iVFUtils.WriteFileHeader(vPacket, MAKE_FOURCC('A', 'V', '0', '1'), pInitializeParams.encodeWidth, pInitializeParams.encodeHeight, pInitializeParams.frameRateNum, pInitializeParams.frameRateDen, 0xFFFF);
+				fpOut.write(reinterpret_cast<char*>(vPacket.data()), vPacket.size());
+				bWriteIVFFileHeader = false;
+				vPacket.clear();
+			}
+			iVFUtils.WriteFrameHeader(vPacket, bitstream_size, pts);
+			fpOut.write(reinterpret_cast<char*>(vPacket.data()), vPacket.size());
+		}
 
 		fpOut.write((const char *)ptr, bitstream_size);
 
@@ -509,6 +525,9 @@ void EncodeCudaOpInVidMem(int nWidth, int nHeight, NV_ENC_BUFFER_FORMAT eFormat,
 	int nFrameSize = pEnc->GetFrameSize();
 	bool bUseCUStream = cuStreamType != -1 ? true : false;
 
+	NV_ENC_INITIALIZE_PARAMS initializeParams = pEnc->GetinitializeParams();
+	bool bWriteIVFFileHeader = true;
+
 	std::unique_ptr<CRC> pCRC;
 	std::unique_ptr<NvCUStream> pCUStream;
 	if (bUseCUStream)
@@ -563,7 +582,7 @@ void EncodeCudaOpInVidMem(int nWidth, int nHeight, NV_ENC_BUFFER_FORMAT eFormat,
 				pCRC->GetCRC(pVideoMemBfr[i], pCUStream->GetOutputCUStream());
 			}
 
-			pDumpVidMemOutput->DumpOutputToFile((CUdeviceptr)(pVideoMemBfr[i]), bUseCUStream ? pCRC->GetCRCVidMemPtr() : 0, fpOut, nFrame);
+			pDumpVidMemOutput->DumpOutputToFile((CUdeviceptr)(pVideoMemBfr[i]), bUseCUStream ? pCRC->GetCRCVidMemPtr() : 0, fpOut, nFrame, bWriteIVFFileHeader, initializeParams);
 
 			nFrame++;
 		}

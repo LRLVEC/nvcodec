@@ -1,5 +1,5 @@
 /*
-* Copyright 2017-2022 NVIDIA Corporation.  All rights reserved.
+* Copyright 2017-2024 NVIDIA Corporation.  All rights reserved.
 *
 * Please refer to the NVIDIA end user license agreement (EULA) associated
 * with this source code for terms and conditions that govern your use of
@@ -34,8 +34,83 @@
 #include "../Utils/NvCodecUtils.h"
 #include "../Utils/FFmpegDemuxer.h"
 #include <chrono>
+#include <future>
 
 simplelogger::Logger *logger = simplelogger::LoggerFactory::CreateConsoleLogger();
+
+struct SessionStats
+{
+    int64_t initTime;   // session initialization time
+    int64_t decodeTime; // time taken by actual decoding operation
+    int frames;     // number of frames decoded
+};
+
+using NvDecodePromise = std::promise<SessionStats>;
+using NvDecodeFuture = std::future<SessionStats>;
+
+
+class NvDecoderPerf : public NvDecoder
+{
+public:
+    NvDecoderPerf(CUcontext cuContext, bool bUseDeviceFrame, cudaVideoCodec eCodec);
+    void SetSessionInitTime(int64_t duration) { m_sessionInitTime = duration; }
+    int64_t GetSessionInitTime() { return m_sessionInitTime; }
+
+    static void IncrementSessionInitCounter() { m_sessionInitCounter++; }
+    static uint32_t GetSessionInitCounter() { return m_sessionInitCounter; }
+    static void SetSessionCount(uint32_t count) { m_sessionCount = count; }
+    static uint32_t GetSessionCount(void) { return m_sessionCount; }
+
+protected:
+    int HandleVideoSequence(CUVIDEOFORMAT *pVideoFormat);
+
+    int64_t m_sessionInitTime;
+    static std::mutex m_initMutex;
+    static std::condition_variable m_cvInit;
+    static uint32_t m_sessionInitCounter;
+    static uint32_t m_sessionCount;
+};
+
+std::mutex NvDecoderPerf::m_initMutex;
+std::condition_variable NvDecoderPerf::m_cvInit;
+uint32_t NvDecoderPerf::m_sessionInitCounter = 0;
+uint32_t NvDecoderPerf::m_sessionCount = 1;
+
+NvDecoderPerf::NvDecoderPerf(CUcontext cuContext, bool bUseDeviceFrame, cudaVideoCodec eCodec)
+: NvDecoder(cuContext, bUseDeviceFrame, eCodec)
+{
+}
+
+int NvDecoderPerf::HandleVideoSequence(CUVIDEOFORMAT *pVideoFormat)
+{
+    auto sessionStart = std::chrono::high_resolution_clock::now();
+
+    int nDecodeSurface = NvDecoder::HandleVideoSequence(pVideoFormat);
+
+    std::unique_lock<std::mutex> lock(m_initMutex);
+
+    IncrementSessionInitCounter();
+
+    // Wait for all threads to finish initialization of the decoder session.
+    // This ensures that all threads start decoding frames at the same
+    // time and saturate the decoder engines. This also leads to more
+    // accurate measurement of decoding performance.
+    if (GetSessionInitCounter() == GetSessionCount())
+    {
+        m_cvInit.notify_all();
+    }
+    else
+    {
+        m_cvInit.wait(lock, [] { return NvDecoderPerf::GetSessionInitCounter() >= NvDecoderPerf::GetSessionCount(); });
+    }
+
+    auto sessionEnd = std::chrono::high_resolution_clock::now();
+    int64_t elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(sessionEnd - sessionStart).count();
+
+    SetSessionInitTime(elapsedTime);
+    return nDecodeSurface;
+}
+
 
 /**
 *   @brief  Function to decode media file using NvDecoder interface
@@ -44,8 +119,11 @@ simplelogger::Logger *logger = simplelogger::LoggerFactory::CreateConsoleLogger(
 *   @param  pnFrame - Variable to record the number of frames decoded
 *   @param  ex      - Stores current exception in case of failure
 */
-void DecProc(NvDecoder *pDec, FFmpegDemuxer *demuxer, int *pnFrame, std::exception_ptr &ex)
+void DecProc(NvDecoderPerf *pDec, FFmpegDemuxer *demuxer, NvDecodePromise& promise, std::exception_ptr &ex)
 {
+    SessionStats stats = {0, 0, 0};
+    auto sessionStart = std::chrono::high_resolution_clock::now();
+
     try
     {
         int nVideoBytes = 0, nFrameReturned = 0, nFrame = 0;
@@ -59,12 +137,18 @@ void DecProc(NvDecoder *pDec, FFmpegDemuxer *demuxer, int *pnFrame, std::excepti
 
             nFrame += nFrameReturned;
         } while (nVideoBytes);
-        *pnFrame = nFrame;
+        stats.frames = nFrame;
+        stats.initTime = pDec->GetSessionInitTime();
     }
     catch (std::exception&)
     {
         ex = std::current_exception();
     }
+
+    auto sessionEnd = std::chrono::high_resolution_clock::now();
+    stats.decodeTime = std::chrono::duration_cast<std::chrono::milliseconds>(sessionEnd - sessionStart).count();
+
+    promise.set_value(stats);
 }
 
 void ShowHelpAndExit(const char *szBadOption = NULL)
@@ -157,6 +241,9 @@ int main(int argc, char **argv)
     bool bSingle = false;
     bool bHost = false;
     std::vector<std::exception_ptr> vExceptionPtrs;
+    std::vector<NvDecodePromise> vPromise;
+    std::vector<NvDecodeFuture> vFuture;
+
     try {
         ParseCommandLine(argc, argv, szInFilePath, iGpu, nThread, bSingle, bHost);
         CheckInputFile(szInFilePath);
@@ -194,10 +281,12 @@ int main(int argc, char **argv)
         std::cout << "GPU in use: " << szDeviceName << std::endl;
 
         std::vector<std::unique_ptr<FFmpegDemuxer>> vDemuxer;
-        std::vector<std::unique_ptr<NvDecoder>> vDec;
+        std::vector<std::unique_ptr<NvDecoderPerf>> vDec;
         CUcontext cuContext = NULL;
         ck(cuCtxCreate(&cuContext, 0, cuDevice));
         vExceptionPtrs.resize(nThread);
+        vPromise.resize(nThread);
+
         for (int i = 0; i < nThread; i++)
         {
             if (!bSingle)
@@ -206,46 +295,33 @@ int main(int argc, char **argv)
             }
             std::unique_ptr<FFmpegDemuxer> demuxer(new FFmpegDemuxer(szInFilePath));
 
-            NvDecoder* sessionObject = new NvDecoder(cuContext, !bHost, FFmpeg2NvCodecId(demuxer->GetVideoCodec()));
-            sessionObject->setDecoderSessionID(i);
-            std::unique_ptr<NvDecoder> dec(sessionObject);
+            NvDecoderPerf* sessionObject = new NvDecoderPerf(cuContext, !bHost, FFmpeg2NvCodecId(demuxer->GetVideoCodec()));
+            std::unique_ptr<NvDecoderPerf> dec(sessionObject);
             vDemuxer.push_back(std::move(demuxer));
             vDec.push_back(std::move(dec));
         }
 
-        std::vector<std::chrono::high_resolution_clock::time_point> vnDecSessionStartTime;
-        std::vector<int64_t> vnDecSessionDuration;
+        NvDecoderPerf::SetSessionCount(nThread);
+
         float totalFPS = 0;
         std::vector<NvThread> vThread;
-        std::vector<int> vnFrame;
-        vnFrame.resize(nThread, 0);
 
         for (int i = 0; i < nThread; i++)
         {
-            vThread.push_back(NvThread(std::thread(DecProc, vDec[i].get(), vDemuxer[i].get(), &vnFrame[i], std::ref(vExceptionPtrs[i]))));
-            vnDecSessionStartTime.push_back(std::chrono::high_resolution_clock::now());
-        }
-        for (int i = 0; i < nThread; i++)
-        {
-            vThread[i].join();
+            vThread.push_back(NvThread(std::thread(DecProc, vDec[i].get(), vDemuxer[i].get(), std::ref(vPromise[i]), std::ref(vExceptionPtrs[i]))));
+            vFuture.push_back(vPromise[i].get_future());
         }
 
         int nTotal = 0;
         for (int i = 0; i < nThread; i++)
         {
-            nTotal += vnFrame[i];
+            SessionStats stats = vFuture[i].get();
+            nTotal += stats.frames;
+
+            totalFPS += (stats.frames / ((stats.decodeTime - stats.initTime) / 1000.0f));
+
+            vThread[i].join();
             vDec[i].reset(nullptr);
-
-            int64_t elapsedTime = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - vnDecSessionStartTime[i]).count();
-            vnDecSessionDuration.push_back(elapsedTime);
-        }
-
-        for (int i = 0; i < nThread; i++)
-        {
-            float decodeDuration = (vnDecSessionDuration[i] - NvDecoder::getDecoderSessionOverHead(i)) / 1000.0f;
-
-            // System FPS is sum of individual session's FPS
-            totalFPS += vnFrame[i] / decodeDuration;
         }
 
         std::cout << "Total Frames Decoded=" << nTotal << " FPS = " << totalFPS << std::endl;

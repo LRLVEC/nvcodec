@@ -1,4 +1,4 @@
-# Copyright 2020-2022 NVIDIA Corporation.  All rights reserved.
+# Copyright 2020-2024 NVIDIA Corporation.  All rights reserved.
 #
 # Please refer to the NVIDIA end user license agreement (EULA) associated
 # with this source code for terms and conditions that govern your use of
@@ -11,14 +11,17 @@ cmake_minimum_required(VERSION 3.7)
 
 project(NvCodec)
 
+if(CMAKE_VERSION VERSION_GREATER "3.27.0" OR CMAKE_VERSION VERSION_EQUAL "3.27.0")   
+    set(CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/External/cmake/Modules)
+    message("Setting CMAKE_MODULE_PATH to ${CMAKE_MODULE_PATH}")
+endif()
+
 # Set C++11 for all projects and disable non-standard extensions
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_INSTALL_PREFIX .)
-
-option(NV_CODEC_BUILD_WITH_VULKAN "Build the sdk with vulkan?" OFF)
 
 # Check for WSL 
 if (EXISTS /usr/lib/wsl/lib)
@@ -86,9 +89,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(SWRESAMPLE_LIB ${SWRESAMPLE_LIBRARY})
 endif()
 
+if(DEFINED FFMPEG_DIR)
+    Set(FFMPEG_DLL_DIR ${FFMPEG_DIR}/bin/)
+    Set(FFMPEG_LIB_DIR ${FFMPEG_DIR}/lib/)
+endif()
 
 if(WIN32)
-
     if (NOT DEFINED AGILITY_SDK_BIN)
         message(WARNING "Agility SDK binary path not configured. Excluding AppEncD3D12")
         message(WARNING "Please get Agility SDK and set AGILITY_SDK_BIN cmake variable to point to the directory containing D3D12Core.dll for your platform")
@@ -103,18 +109,13 @@ if(WIN32)
         else()
             add_subdirectory(AppEncode/AppEncD3D12)        
         endif()
-    endif()
-    
+    endif()    
     add_subdirectory(AppEncode/AppEncD3D11)
     add_subdirectory(AppEncode/AppEncD3D9)
-    add_subdirectory(AppDecode/AppDecD3D)
 endif()
 
 if (NOT WSL_FLAG)
-    add_subdirectory(AppDecode/AppDecGL)
-    if (NV_CODEC_BUILD_WITH_VULKAN)
-        add_subdirectory(AppEncode/AppMotionEstimationVkCuda)
-    endif()
+    add_subdirectory(AppEncode/AppMotionEstimationVkCuda)
     #Need only linux Makefile for this
     if (NOT WIN32)
         add_subdirectory(AppEncode/AppEncGL)
@@ -122,20 +123,85 @@ if (NOT WSL_FLAG)
 endif()
 
 add_subdirectory(AppEncode/AppEncCuda)
-add_subdirectory(AppEncode/AppEncDec)
+
 add_subdirectory(AppEncode/AppEncLowLatency)
 add_subdirectory(AppEncode/AppEncME)
 add_subdirectory(AppEncode/AppEncPerf)
+add_subdirectory(AppEncode/AppEncMultiInstance)
 add_subdirectory(AppEncode/AppEncQual)
-add_subdirectory(AppTranscode/AppTrans)
-add_subdirectory(AppTranscode/AppTransOneToN)
-add_subdirectory(AppTranscode/AppTransPerf)
-add_subdirectory(AppDecode/AppDec)
-add_subdirectory(AppDecode/AppDecImageProvider)
-add_subdirectory(AppDecode/AppDecLowLatency)
-add_subdirectory(AppDecode/AppDecMem)
-add_subdirectory(AppDecode/AppDecMultiFiles)
-add_subdirectory(AppDecode/AppDecMultiInput)
-add_subdirectory(AppDecode/AppDecPerf)
 
+if(WIN32)
+    # check if FFMpeg, GLUT and GLEW library cmake variables are set and 
+    # add projects having above dependencies accordingly for Windows
+    if(DEFINED FFMPEG_DIR)
+        add_subdirectory(AppEncode/AppEncDec)
+        add_subdirectory(AppTranscode/AppTrans)
+        add_subdirectory(AppTranscode/AppTransOneToN)
+        add_subdirectory(AppTranscode/AppTransPerf)
+        add_subdirectory(AppDecode/AppDec)
+        add_subdirectory(AppDecode/AppDecImageProvider)
+        add_subdirectory(AppDecode/AppDecLowLatency)
+        add_subdirectory(AppDecode/AppDecMem)
+        add_subdirectory(AppDecode/AppDecMultiFiles)
+        add_subdirectory(AppDecode/AppDecMultiInput)
+        add_subdirectory(AppDecode/AppDecPerf)
+        add_subdirectory(AppDecode/AppDecD3D)
+    elseif((NOT DEFINED FFMPEG_DIR) AND (NOT DEFINED SKIP_FFMPEG_DEPENDENCY))
+        message("FFMPEG Libraries are needed to build the following apps :")
+        message("AppDec, AppDec3D, AppDecGL, AppDecImageProvider, AppDecLowLatency, AppDecMem,")
+        message("AppDecMultiFiles, AppDecMultiInput, AppDecPerf, AppEncDec, AppTranscode")
+        message("It is required to fetch the prebuilt LGPL FFMPEG libraries and to set the variable FFMPEG_DIR to point to this libraries")
+        message("To skip building of apps having FFMPEG dependency, add -DSKIP_FFMPEG_DEPENDENCY=TRUE to commandline")
+		message("See Windows Configuration Requirements section in Read_Me.pdf for detailed instructions")
+        message(FATAL_ERROR "FFMPEG_DIR not set")
+    endif()
+    
+    if(NOT WSL_FLAG)
+        if((DEFINED GLUT_DIR) AND (DEFINED GLUT_INC) AND (DEFINED GLEW_DIR))
+            add_subdirectory(AppDecode/AppDecGL)
+        elseif((NOT DEFINED GLUT_DIR) AND (NOT DEFINED SKIP_GL_DEPENDENCY))
+            message("GLUT Libraries are needed to build the following apps : AppDecGL")
+            message("It is required to build freeglut locally and to set following cmake variables :")
+            message("GLUT_DIR : to point to the GLUT libraries")
+            message("GLUT_INC : to point to the GLUT headers")            
+            message("To skip building of apps having GLUT dependency, add -DSKIP_GL_DEPENDENCY=TRUE to commandline")
+			message("See Windows Configuration Requirements section in Read_Me.pdf for detailed instructions")
+            message(FATAL_ERROR "GLUT_DIR not set")
+        elseif((NOT DEFINED GLEW_DIR) AND (NOT DEFINED SKIP_GL_DEPENDENCY))
+            message("GLEW Libraries are needed to build the following apps : AppDecGL")
+            message("It is required to fetch prebuilt GLEW libraries and to set variable GLEW_DIR to point to the GLEW libraries") 
+            message("To skip building of apps having GLEW dependency, add -DSKIP_GL_DEPENDENCY=TRUE to commandline")
+			message("See Windows Configuration Requirements section in Read_Me.pdf for detailed instructions")
+            message(FATAL_ERROR "GLUT_DIR not set")
+        endif()
+    endif()
 
+else()
+    if(NOT WSL_FLAG)
+        add_subdirectory(AppDecode/AppDecGL)
+    endif ()
+    add_subdirectory(AppEncode/AppEncDec)
+    add_subdirectory(AppTranscode/AppTrans)
+    add_subdirectory(AppTranscode/AppTransOneToN)
+    add_subdirectory(AppTranscode/AppTransPerf)
+    add_subdirectory(AppDecode/AppDec)
+    add_subdirectory(AppDecode/AppDecImageProvider)
+    add_subdirectory(AppDecode/AppDecLowLatency)
+    add_subdirectory(AppDecode/AppDecMem)
+    add_subdirectory(AppDecode/AppDecMultiFiles)
+    add_subdirectory(AppDecode/AppDecMultiInput)
+    add_subdirectory(AppDecode/AppDecPerf)
+endif()
+
+if(DEFINED FFMPEG_DIR)
+    file(GLOB externalLibList 
+        ${FFMPEG_DLL_DIR}*.dll 
+        ${FFMPEG_LIB_DIR}*.lib
+    )    
+    add_custom_target(copyFFMPEGFiles ALL)
+    add_custom_command(TARGET copyFFMPEGFiles COMMAND ${CMAKE_COMMAND} -E make_directory  ${NVCODEC_SAMPLES_INSTALL_DIR}/$<CONFIG>/)
+
+    foreach(externalLib ${externalLibList})
+        add_custom_command(TARGET copyFFMPEGFiles COMMAND ${CMAKE_COMMAND} -E copy ${externalLib} ${NVCODEC_SAMPLES_INSTALL_DIR}/$<CONFIG>/)
+    endforeach()
+endif()

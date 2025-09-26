@@ -1,13 +1,29 @@
 /*
-* Copyright 2017-2022 NVIDIA Corporation.  All rights reserved.
-*
-* Please refer to the NVIDIA end user license agreement (EULA) associated
-* with this source code for terms and conditions that govern your use of
-* this software. Any use, reproduction, disclosure, or distribution of
-* this software and related documentation outside the terms of the EULA
-* is strictly prohibited.
-*
-*/
+ * This copyright notice applies to this header file only:
+ *
+ * Copyright (c) 2010-2024 NVIDIA Corporation
+ *
+ * Permission is hereby granted, free of charge, to any person
+ * obtaining a copy of this software and associated documentation
+ * files (the "Software"), to deal in the Software without
+ * restriction, including without limitation the rights to use,
+ * copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the software, and to permit persons to whom the
+ * software is furnished to do so, subject to the following
+ * conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+ * OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+ * HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+ * WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ */
 
 #include <iostream>
 #include <algorithm>
@@ -128,8 +144,6 @@ static int GetChromaPlaneCount(cudaVideoSurfaceFormat eSurfaceFormat)
 
     return numPlane;
 }
-
-std::map<int, int64_t> NvDecoder::sessionOverHead = { {0,0}, {1,0} };
 
 /**
 *   @brief  This function is used to get codec string from codec id
@@ -346,7 +360,6 @@ int NvDecoder::HandleVideoSequence(CUVIDEOFORMAT *pVideoFormat)
     NVDEC_API_CALL(cuvidCreateDecoder(&m_hDecoder, &videoDecodeCreateInfo));
     CUDA_DRVAPI_CALL(cuCtxPopCurrent(NULL));
     STOP_TIMER("Session Initialization Time: ");
-    NvDecoder::addDecoderSessionOverHead(getDecoderSessionID(), elapsedTime);
     return nDecodeSurface;
 }
 
@@ -552,19 +565,51 @@ int NvDecoder::HandlePictureDisplay(CUVIDPARSERDISPINFO *pDispInfo) {
             {
                 for (uint32_t i = 0; i < seiNumMessages; i++)
                 {
-                    if (m_eCodec == cudaVideoCodec_H264 || cudaVideoCodec_H264_SVC || cudaVideoCodec_H264_MVC || cudaVideoCodec_HEVC)
+                    if ((m_eCodec == cudaVideoCodec_H264) ||
+                        (m_eCodec == cudaVideoCodec_H264_SVC) ||
+                        (m_eCodec == cudaVideoCodec_H264_MVC) ||
+                        (m_eCodec == cudaVideoCodec_HEVC) ||
+                        (m_eCodec == cudaVideoCodec_MPEG2))
                     {    
                         switch (seiMessagesInfo[i].sei_message_type)
                         {
                             case SEI_TYPE_TIME_CODE:
+                            case SEI_TYPE_TIME_CODE_H264:
                             {
-                                HEVCSEITIMECODE *timecode = (HEVCSEITIMECODE *)seiBuffer;
-                                fwrite(timecode, sizeof(HEVCSEITIMECODE), 1, m_fpSEI);
+                                if (m_eCodec != cudaVideoCodec_MPEG2)
+                                {
+                                    TIMECODE *timecode = (TIMECODE *)seiBuffer;
+                                    fwrite(timecode, sizeof(TIMECODE), 1, m_fpSEI);
+                                }
+                                else
+                                {
+                                    TIMECODEMPEG2 *timecode = (TIMECODEMPEG2 *)seiBuffer;
+                                    fwrite(timecode, sizeof(TIMECODEMPEG2), 1, m_fpSEI);
+                                }
                             }
                             break;
+                            case SEI_TYPE_USER_DATA_REGISTERED:
                             case SEI_TYPE_USER_DATA_UNREGISTERED:
                             {
                                 fwrite(seiBuffer, seiMessagesInfo[i].sei_message_size, 1, m_fpSEI);
+                            }
+                            break;
+                            case SEI_TYPE_MASTERING_DISPLAY_COLOR_VOLUME:
+                            {
+                                SEIMASTERINGDISPLAYINFO *masteringDisplayVolume = (SEIMASTERINGDISPLAYINFO *)seiBuffer;
+                                fwrite(masteringDisplayVolume, sizeof(SEIMASTERINGDISPLAYINFO), 1, m_fpSEI);
+                            }
+                            break;
+                            case SEI_TYPE_CONTENT_LIGHT_LEVEL_INFO:
+                            {
+                                SEICONTENTLIGHTLEVELINFO *contentLightLevelInfo = (SEICONTENTLIGHTLEVELINFO *)seiBuffer;
+                                fwrite(contentLightLevelInfo, sizeof(SEICONTENTLIGHTLEVELINFO), 1, m_fpSEI);
+                            }
+                            break;
+                            case SEI_TYPE_ALTERNATIVE_TRANSFER_CHARACTERISTICS:
+                            {
+                                SEIALTERNATIVETRANSFERCHARACTERISTICS *transferCharacteristics = (SEIALTERNATIVETRANSFERCHARACTERISTICS *)seiBuffer;
+                                fwrite(transferCharacteristics, sizeof(SEIALTERNATIVETRANSFERCHARACTERISTICS), 1, m_fpSEI);
                             }
                             break;
                         }            
@@ -714,8 +759,6 @@ NvDecoder::NvDecoder(CUcontext cuContext, bool bUseDeviceFrame, cudaVideoCodec e
 
     ck(cuStreamCreate(&m_cuvidStream, CU_STREAM_DEFAULT));
 
-    decoderSessionID = 0;
-
     if (m_bExtractSEIMessage)
     {
         m_fpSEI = fopen("sei_message.txt", "wb");
@@ -776,8 +819,6 @@ NvDecoder::~NvDecoder() {
     cuvidCtxLockDestroy(m_ctxLock);
 
     STOP_TIMER("Session Deinitialization Time: ");
-
-    NvDecoder::addDecoderSessionOverHead(getDecoderSessionID(), elapsedTime);
 }
 
 int NvDecoder::Decode(const uint8_t *pData, int nSize, int nFlags, int64_t nTimestamp)

@@ -1,4 +1,4 @@
-# Copyright 2020-2022 NVIDIA Corporation.  All rights reserved.
+# Copyright 2020-2024 NVIDIA Corporation.  All rights reserved.
 #
 # Please refer to the NVIDIA end user license agreement (EULA) associated
 # with this source code for terms and conditions that govern your use of
@@ -40,6 +40,12 @@ find_package(CUDA)
 set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
 
 set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-gencode arch=compute_50,code=\"sm_50,compute_50\")
+# CUDA 11.7 and later is compiled with /MT option (staticaly linked with C runtime), 
+# since we are statically linking cudart_static.lib with the app, 
+# we need to make sure that all .obj files linked are compiled with /MT to avoid linker warning LNK4098
+if (WIN32 AND CUDA_VERSION_MAJOR GREATER_EQUAL 11 AND CUDA_VERSION_MINOR GREATER_EQUAL 7)
+    set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};-Xcompiler /MT)
+endif()
 if ( CMAKE_COMPILER_IS_GNUCC )
     if(NOT "${CUDA_NVCC_FLAGS}" MATCHES "-std=c\\+\\+11" )
         list(APPEND CUDA_NVCC_FLAGS -std=c++11)
@@ -48,6 +54,9 @@ endif()
 
 cuda_add_executable(${PROJECT_NAME}  ${APP_SOURCES} ${NV_ENC_SOURCES} ${NV_ENC_CUDA_UTILS} ${NV_ENC_HDRS})
 
+if (WIN32 AND CUDA_VERSION_MAJOR GREATER_EQUAL 11 AND CUDA_VERSION_MINOR GREATER_EQUAL 7)
+    target_compile_options(${PROJECT_NAME} PRIVATE "/MT")
+endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${CUDA_INCLUDE_DIRS}

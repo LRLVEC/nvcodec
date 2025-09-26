@@ -1,5 +1,5 @@
 /*
-* Copyright 2017-2022 NVIDIA Corporation.  All rights reserved.
+* Copyright 2017-2024 NVIDIA Corporation.  All rights reserved.
 *
 * Please refer to the NVIDIA end user license agreement (EULA) associated
 * with this source code for terms and conditions that govern your use of
@@ -66,7 +66,7 @@ public:
         pHostMem->Release();
     }
 
-    void DumpOutputToFile(void * pVideoMemoryBuffer, std::ofstream &fpOut)
+    void DumpOutputToFile(void * pVideoMemoryBuffer, std::ofstream &fpOut, bool &bWriteIVFFileHeader, NV_ENC_INITIALIZE_PARAMS &pInitializeParams)
     {
         pContext->CopyResource((ID3D11Buffer *)pHostMem, (ID3D11Buffer *)(pVideoMemoryBuffer));
 
@@ -84,6 +84,22 @@ public:
         unsigned int bitstreamBufferSize = bfrSize - sizeof(NV_ENC_ENCODE_OUT_PARAMS);
 
         unsigned int numBytesToCopy = (pEncOutParams->bitstreamSizeInBytes > bitstreamBufferSize) ? bitstreamBufferSize : pEncOutParams->bitstreamSizeInBytes;
+
+        IVFUtils iVFUtils;
+        int64_t pts = 0;
+        std::vector<uint8_t> vPacket;
+        if (pInitializeParams.encodeGUID == NV_ENC_CODEC_AV1_GUID)
+        {
+            if (bWriteIVFFileHeader)
+            {
+                iVFUtils.WriteFileHeader(vPacket, MAKE_FOURCC('A', 'V', '0', '1'), pInitializeParams.encodeWidth, pInitializeParams.encodeHeight, pInitializeParams.frameRateNum, pInitializeParams.frameRateDen, 0xFFFF);
+                fpOut.write(reinterpret_cast<char*>(vPacket.data()), vPacket.size());
+                bWriteIVFFileHeader = false;
+                vPacket.clear();
+            }
+            iVFUtils.WriteFrameHeader(vPacket, numBytesToCopy, pts);
+            fpOut.write(reinterpret_cast<char*>(vPacket.data()), vPacket.size());
+        }
 
         fpOut.write((const char *)pEncOutput, numBytesToCopy);
 
@@ -198,6 +214,9 @@ void EncodeOutputInVidMem(ID3D11Device *pDevice, ID3D11DeviceContext *pContext, 
     std::unique_ptr<uint8_t[]> pHostFrame(new uint8_t[nSize]);
     int nFrame = 0;
 
+    NV_ENC_INITIALIZE_PARAMS initializeParams = enc.GetinitializeParams();    
+    bool bWriteIVFFileHeader = true;
+
     // For dumping output to a file
     std::unique_ptr<DumpVidMemOutput> pDumpVidMemOutput(new DumpVidMemOutput(pDevice, pContext, enc.GetOutputBufferSize()));
 
@@ -221,7 +240,7 @@ void EncodeOutputInVidMem(ID3D11Device *pDevice, ID3D11DeviceContext *pContext, 
  
         for (uint32_t i = 0; i < pVideoMemBfr.size(); ++i)
         {
-            pDumpVidMemOutput->DumpOutputToFile(pVideoMemBfr[i], fpOut);
+            pDumpVidMemOutput->DumpOutputToFile(pVideoMemBfr[i], fpOut, bWriteIVFFileHeader, initializeParams);
 
             nFrame++;
         }
